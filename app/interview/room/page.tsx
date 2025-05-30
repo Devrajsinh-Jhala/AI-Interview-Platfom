@@ -4,11 +4,32 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Vapi from "@vapi-ai/web";
-import { ArrowLeft, Mic, MicOff, Timer } from "lucide-react";
+import {
+  ArrowLeft,
+  Mic,
+  MicOff,
+  Timer,
+  Loader2,
+  AlertTriangle,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CodeEditor } from "@/components/interview/CodeEditor";
 import { ProblemDisplay } from "@/components/interview/ProblemDisplay";
 import { InterviewConfig } from "@/types/interview";
+
+// Define the structure for a transcript message for feedback
+interface FeedbackTranscriptMessage {
+  role: "user" | "assistant";
+  content: string;
+  timestamp?: Date;
+}
+
+// Type for messages displayed in the UI transcript
+type DisplayMessage = {
+  role: "user" | "assistant";
+  content: string;
+  timestamp: Date;
+};
 
 // Enhanced Timer component
 function InterviewTimer({
@@ -135,19 +156,14 @@ function AnimatedRobot({
   );
 }
 
-type Message = {
-  role: "user" | "assistant";
-  content: string;
-  timestamp: Date;
-};
-
 export default function InterviewRoomPage() {
   const router = useRouter();
   const [initialLoading, setInitialLoading] = useState(true);
   const [interviewConfig, setInterviewConfig] =
     useState<InterviewConfig | null>(null);
   const [code, setCode] = useState(
-    "// Write your JavaScript solution here\n\nfunction solution() {\n  // Your code here\n}\n"
+    // Default initial code
+    '// Write your C++ solution here\n\n#include <iostream>\n\nint main() {\n  // Your code here\n  std::cout << "Hello, C++!" << std::endl;\n  return 0;\n}\n'
   );
   const [problem, setProblem] = useState<{
     title: string;
@@ -155,7 +171,9 @@ export default function InterviewRoomPage() {
   } | null>(null);
   const [isCallActive, setIsCallActive] = useState(false);
   const [isMicrophoneEnabled, setIsMicrophoneEnabled] = useState(true);
-  const [transcript, setTranscript] = useState<Message[]>([]);
+  const [displayTranscript, setDisplayTranscript] = useState<DisplayMessage[]>(
+    []
+  );
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isSpeaking, setIsSpeaking] = useState<{
@@ -167,20 +185,109 @@ export default function InterviewRoomPage() {
   const currentCodeRef = useRef(code);
   const codeUpdateTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const vapiRef = useRef<Vapi | null>(null);
-  const transcriptEndRef = useRef<HTMLDivElement>(null);
-
-  const lastTranscriptRef = useRef<{
+  const displayTranscriptEndRef = useRef<HTMLDivElement | null>(null);
+  const lastDisplayTranscriptRef = useRef<{
     role: string;
     content: string;
     timestamp: number;
   }>({ role: "", content: "", timestamp: 0 });
-  const transcriptTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-
+  const displayTranscriptTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const finalUtterancesRef = useRef<FeedbackTranscriptMessage[]>([]);
   const assistantModelOutputBufferRef = useRef<string>("");
   const assistantModelOutputTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
+  useEffect(() => {
+    currentCodeRef.current = code;
+  }, [code]);
+
+  const processAssistantContentForProblem = useCallback(
+    (textContent: string) => {
+      if (textContent && typeof textContent === "string") {
+        const normalizedContentForDetection = textContent
+          .trim()
+          .replace(/\s+/g, " ");
+        if (
+          normalizedContentForDetection.toUpperCase().includes("PROBLEM START")
+        ) {
+          const problemRegex =
+            /PROBLEM\s*START([\s\S]*?)DESCRIPTION([\s\S]*?)PROBLEM\s*END/i;
+          const match = textContent.match(problemRegex);
+          if (match && match[1] && match[2]) {
+            const title = match[1].trim();
+            const description = match[2].trim();
+            if (title && description) {
+              setProblem({ title, description });
+              console.log("🎯 Problem PARSED:", { title, description });
+            } else {
+              console.warn(
+                "⚠️ Problem parsed but title or description is empty.",
+                { title, description }
+              );
+              setProblem(null);
+            }
+          } else {
+            console.warn("🔍 'PROBLEM START' found, but regex failed.", {
+              content: textContent.substring(0, 100),
+            });
+            setProblem(null);
+          }
+        }
+      }
+    },
+    []
+  );
+
+  const redirectToFeedbackPage = useCallback(() => {
+    if (!interviewConfig) {
+      console.error("Cannot redirect to feedback, interviewConfig is missing.");
+      router.push("/");
+      return;
+    }
+    if (assistantModelOutputBufferRef.current.trim().length > 0) {
+      finalUtterancesRef.current.push({
+        role: "assistant",
+        content: assistantModelOutputBufferRef.current,
+        timestamp: new Date(),
+      });
+      assistantModelOutputBufferRef.current = "";
+    }
+    if (lastDisplayTranscriptRef.current.content.length > 0) {
+      finalUtterancesRef.current.push({
+        role: lastDisplayTranscriptRef.current.role as "user" | "assistant",
+        content: lastDisplayTranscriptRef.current.content,
+        timestamp: new Date(lastDisplayTranscriptRef.current.timestamp),
+      });
+      lastDisplayTranscriptRef.current = {
+        role: "",
+        content: "",
+        timestamp: 0,
+      };
+    }
+
+    const uniqueFinalUtterances = Array.from(
+      new Map(
+        finalUtterancesRef.current.map((item) => [
+          `${item.role}-${item.content}-${item.timestamp?.getTime()}`,
+          item,
+        ])
+      ).values()
+    );
+
+    const feedbackData = {
+      interviewConfig,
+      problem,
+      finalCode: currentCodeRef.current,
+      cleanTranscript: uniqueFinalUtterances,
+    };
+
+    console.log("Data being saved for feedback:", feedbackData);
+    localStorage.setItem("interviewFeedbackData", JSON.stringify(feedbackData));
+    localStorage.removeItem("interviewConfig");
+    router.push("/interview/feedback");
+  }, [interviewConfig, problem, router]);
+
   const handleTimerExpire = useCallback(() => {
-    console.log("⏰ Timer expired - ending interview session");
+    console.log("⏰ Timer expired - preparing for feedback");
     if (vapiRef.current && isCallActive) {
       try {
         vapiRef.current.stop();
@@ -190,13 +297,12 @@ export default function InterviewRoomPage() {
     }
     setIsCallActive(false);
     setIsEnding(true);
-    localStorage.removeItem("interviewConfig");
-    setTimeout(() => router.push("/"), 3000);
-  }, [isCallActive, router]);
+    redirectToFeedbackPage();
+  }, [isCallActive, redirectToFeedbackPage]);
 
   const endCall = useCallback(
-    (redirect = true) => {
-      console.log("🛑 Ending interview session...");
+    (redirectForFeedback = true) => {
+      console.log("🛑 Ending interview session");
       setIsEnding(true);
       if (vapiRef.current && isCallActive) {
         try {
@@ -205,78 +311,46 @@ export default function InterviewRoomPage() {
           console.error("❌ Error ending call:", err);
         }
       }
-      setIsCallActive(false);
-      localStorage.removeItem("interviewConfig");
-      if (redirect) {
-        setTimeout(() => router.push("/"), 2000);
+      setIsCallActive(false); // Ensure call is marked inactive
+      if (redirectForFeedback) {
+        redirectToFeedbackPage();
+      } else {
+        localStorage.removeItem("interviewConfig");
+        router.push("/");
       }
     },
-    [isCallActive, router]
+    [isCallActive, redirectToFeedbackPage, router]
   );
 
-  // Problem Parsing Function (defined once, used by Vapi message handler)
-  const processAssistantContentForProblem = useCallback(
-    (textContent: string) => {
-      if (textContent && typeof textContent === "string") {
-        const normalizedContentForDetection = textContent
-          .trim()
-          .replace(/\s+/g, " ");
-        console.log(
-          "🧼 Problem Parsing Function: Normalized Content for Detection:",
-          normalizedContentForDetection
-        );
-
-        // Use original textContent for regex to preserve newlines for description
-        if (
-          normalizedContentForDetection.toUpperCase().includes("PROBLEM START")
-        ) {
-          console.log("✅ 'PROBLEM START' detected in content for parsing.");
-          const problemRegex =
-            /PROBLEM\s*START([\s\S]*?)DESCRIPTION([\s\S]*?)PROBLEM\s*END/i;
-          const match = textContent.match(problemRegex);
-
-          if (match && match[1] && match[2]) {
-            const title = match[1].trim();
-            const description = match[2].trim();
-            console.log(
-              "🎯 Problem PARSED SUCCESSFULLY (from processAssistantContentForProblem):",
-              { title, description }
-            );
-            if (title && description) {
-              setProblem({ title, description });
-            } else {
-              console.warn(
-                "⚠️ Problem parsed but title or description is empty after trim.",
-                { title, description }
-              );
-              setProblem(null);
-            }
-          } else {
-            console.warn(
-              "🔍 'PROBLEM START' found, but regex failed on content.",
-              "\nRegex:",
-              problemRegex.toString(),
-              "\nOriginal Content for Regex:",
-              textContent.substring(0, 500) + "...", // Log snippet
-              "\nMatch object:",
-              match
-            );
-            setProblem(null);
+  const handleCodeChange = useCallback(
+    (newCode: string) => {
+      setCode(newCode); // This updates currentCodeRef via useEffect
+      if (codeUpdateTimeoutRef.current)
+        clearTimeout(codeUpdateTimeoutRef.current);
+      codeUpdateTimeoutRef.current = setTimeout(() => {
+        if (isCallActive && vapiRef.current && newCode.trim().length > 0) {
+          try {
+            vapiRef.current.send({
+              type: "add-message",
+              message: {
+                role: "system",
+                content: `The candidate has updated their code. Current code:\n\`\`\`\n${newCode}\n\`\`\`\nSilently review this code. Only provide feedback if the candidate explicitly asks for help or seems very stuck with their verbal explanation. Do not comment on every minor change.`,
+              },
+            });
+            console.log("📤 Candidate code update sent to Vapi AI.");
+          } catch (err) {
+            console.error("❌ Error sending code update to Vapi AI:", err);
           }
-        } else {
-          // console.log("🚫 'PROBLEM START' not found in this processed assistant content.");
         }
-      }
+      }, 2500);
     },
-    []
-  ); // Empty dependency array as it uses no props/state directly
+    [isCallActive]
+  );
 
   useEffect(() => {
     const apiKey = process.env.NEXT_PUBLIC_VAPI_API_KEY;
-    console.log("🔧 Initializing Vapi with API key present:", !!apiKey);
-
     if (!apiKey) {
-      setError("Vapi API key is missing. Please check your .env.local file.");
+      setError("Vapi API key is missing.");
       setInitialLoading(false);
       return;
     }
@@ -285,35 +359,37 @@ export default function InterviewRoomPage() {
       try {
         const vapi = new Vapi(apiKey);
         vapiRef.current = vapi;
-        console.log("✅ Vapi instance created successfully");
 
         vapi.on("call-start", () => {
-          console.log("🚀 Call started successfully");
           setIsCallActive(true);
           setIsConnecting(false);
           setError(null);
+          console.log("🚀 Call started");
         });
-
         vapi.on("call-end", () => {
-          console.log("📞 Call ended");
           setIsCallActive(false);
           setIsConnecting(false);
           setIsSpeaking({ user: false, assistant: false });
+          console.log("📞 Call ended");
         });
-
         vapi.on("speech-start", () => {
-          console.log("🎤 User started speaking");
           setIsSpeaking((prev) => ({ ...prev, user: true, assistant: false }));
+          console.log("🎤 User speaking");
         });
-
         vapi.on("speech-end", () => {
-          console.log("🔇 User stopped speaking");
           setIsSpeaking((prev) => ({ ...prev, user: false }));
+          console.log("🔇 User stopped speaking");
+        });
+        vapi.on("error", (e: any) => {
+          setError(e?.message || "Vapi error");
+          setIsCallActive(false);
+          setIsConnecting(false);
+          console.error("❌ Vapi error:", e);
         });
 
         vapi.on("message", (message: any) => {
           console.log("📨 VAPI_MESSAGE_RAW:", JSON.stringify(message, null, 2));
-          let fullAssistantUtteranceForParsing: string | null = null;
+          let fullAssistantUtteranceForProblemParsing: string | null = null;
 
           if (
             message.type === "model-output" &&
@@ -331,105 +407,123 @@ export default function InterviewRoomPage() {
             assistantModelOutputTimeoutRef.current = setTimeout(() => {
               if (assistantModelOutputBufferRef.current.trim().length > 0) {
                 console.log(
-                  "🕒 Assistant Model Output Buffer TIMEOUT - Processing accumulated content."
+                  "🕒 Assistant Model Output Buffer TIMEOUT processing."
                 );
                 processAssistantContentForProblem(
                   assistantModelOutputBufferRef.current
                 );
-                assistantModelOutputBufferRef.current = "";
+                finalUtterancesRef.current.push({
+                  role: "assistant",
+                  content: assistantModelOutputBufferRef.current,
+                  timestamp: new Date(),
+                });
+                assistantModelOutputBufferRef.current = ""; // Clear after processing
                 setIsSpeaking((prev) => ({ ...prev, assistant: false }));
               }
             }, 1500);
           }
 
           if (message.type === "transcript") {
-            if (message.role === "assistant" && message.transcript) {
-              if (message.transcriptType === "final") {
-                console.log(
-                  "🎤 Assistant FINAL Transcript received. Processing for problem."
-                );
-                fullAssistantUtteranceForParsing = message.transcript;
-                if (assistantModelOutputTimeoutRef.current)
-                  clearTimeout(assistantModelOutputTimeoutRef.current);
-                assistantModelOutputBufferRef.current = "";
-                setIsSpeaking((prev) => ({ ...prev, assistant: false }));
-              }
-            }
-            // Transcript display logic
-            const newContent = message.transcript?.trim() || "";
             const role = message.role === "assistant" ? "assistant" : "user";
-            const currentTime = Date.now();
-
-            if (transcriptTimeoutRef.current)
-              clearTimeout(transcriptTimeoutRef.current);
-
-            const shouldConsolidate =
-              lastTranscriptRef.current.role === role &&
-              currentTime - lastTranscriptRef.current.timestamp < 3500 &&
-              (message.transcriptType !== "final" ||
-                newContent.length > lastTranscriptRef.current.content.length);
-
-            if (shouldConsolidate) {
-              lastTranscriptRef.current.content = newContent;
-              lastTranscriptRef.current.timestamp = currentTime;
-            } else {
-              if (lastTranscriptRef.current.content.length > 0) {
-                setTranscript((prev) =>
-                  addUniqueMessage(prev, {
-                    role: lastTranscriptRef.current.role as
-                      | "user"
-                      | "assistant",
-                    content: lastTranscriptRef.current.content,
-                    timestamp: new Date(lastTranscriptRef.current.timestamp),
-                  })
-                );
+            if (message.transcript) {
+              // Add to finalUtterancesRef for feedback data
+              if (message.transcriptType === "final" || role === "user") {
+                finalUtterancesRef.current.push({
+                  role,
+                  content: message.transcript,
+                  timestamp: new Date(),
+                });
+                if (
+                  role === "assistant" &&
+                  message.transcriptType === "final"
+                ) {
+                  fullAssistantUtteranceForProblemParsing = message.transcript;
+                  if (assistantModelOutputTimeoutRef.current)
+                    clearTimeout(assistantModelOutputTimeoutRef.current);
+                  assistantModelOutputBufferRef.current = "";
+                  setIsSpeaking((prev) => ({ ...prev, assistant: false }));
+                }
               }
-              lastTranscriptRef.current = {
-                role,
-                content: newContent,
-                timestamp: currentTime,
-              };
-            }
+              // Logic for UI display transcript
+              const newContent = message.transcript.trim();
+              const currentTime = Date.now();
+              if (displayTranscriptTimeoutRef.current)
+                clearTimeout(displayTranscriptTimeoutRef.current);
+              const shouldConsolidate =
+                lastDisplayTranscriptRef.current.role === role &&
+                currentTime - lastDisplayTranscriptRef.current.timestamp <
+                  3500 &&
+                (message.transcriptType !== "final" ||
+                  newContent.length >
+                    lastDisplayTranscriptRef.current.content.length);
 
-            if (
-              message.transcriptType === "final" ||
-              currentTime - lastTranscriptRef.current.timestamp > 3000
-            ) {
-              if (lastTranscriptRef.current.content.length > 0) {
-                setTranscript((prev) =>
-                  addUniqueMessage(prev, {
-                    role: lastTranscriptRef.current.role as
-                      | "user"
-                      | "assistant",
-                    content: lastTranscriptRef.current.content,
-                    timestamp: new Date(lastTranscriptRef.current.timestamp),
-                  })
-                );
-                lastTranscriptRef.current = {
-                  role: "",
-                  content: "",
-                  timestamp: 0,
-                };
-              }
-            } else {
-              transcriptTimeoutRef.current = setTimeout(() => {
-                if (lastTranscriptRef.current.content.length > 0) {
-                  setTranscript((prev) =>
-                    addUniqueMessage(prev, {
-                      role: lastTranscriptRef.current.role as
+              if (shouldConsolidate) {
+                lastDisplayTranscriptRef.current.content = newContent;
+                lastDisplayTranscriptRef.current.timestamp = currentTime;
+              } else {
+                if (lastDisplayTranscriptRef.current.content.length > 0) {
+                  setDisplayTranscript((prev) =>
+                    addUniqueDisplayMessage(prev, {
+                      role: lastDisplayTranscriptRef.current.role as
                         | "user"
                         | "assistant",
-                      content: lastTranscriptRef.current.content,
-                      timestamp: new Date(lastTranscriptRef.current.timestamp),
+                      content: lastDisplayTranscriptRef.current.content,
+                      timestamp: new Date(
+                        lastDisplayTranscriptRef.current.timestamp
+                      ),
                     })
                   );
-                  lastTranscriptRef.current = {
+                }
+                lastDisplayTranscriptRef.current = {
+                  role,
+                  content: newContent,
+                  timestamp: currentTime,
+                };
+              }
+              if (
+                message.transcriptType === "final" ||
+                currentTime - lastDisplayTranscriptRef.current.timestamp > 3000
+              ) {
+                if (lastDisplayTranscriptRef.current.content.length > 0) {
+                  setDisplayTranscript((prev) =>
+                    addUniqueDisplayMessage(prev, {
+                      role: lastDisplayTranscriptRef.current.role as
+                        | "user"
+                        | "assistant",
+                      content: lastDisplayTranscriptRef.current.content,
+                      timestamp: new Date(
+                        lastDisplayTranscriptRef.current.timestamp
+                      ),
+                    })
+                  );
+                  lastDisplayTranscriptRef.current = {
                     role: "",
                     content: "",
                     timestamp: 0,
                   };
                 }
-              }, 3500);
+              } else {
+                displayTranscriptTimeoutRef.current = setTimeout(() => {
+                  if (lastDisplayTranscriptRef.current.content.length > 0) {
+                    setDisplayTranscript((prev) =>
+                      addUniqueDisplayMessage(prev, {
+                        role: lastDisplayTranscriptRef.current.role as
+                          | "user"
+                          | "assistant",
+                        content: lastDisplayTranscriptRef.current.content,
+                        timestamp: new Date(
+                          lastDisplayTranscriptRef.current.timestamp
+                        ),
+                      })
+                    );
+                    lastDisplayTranscriptRef.current = {
+                      role: "",
+                      content: "",
+                      timestamp: 0,
+                    };
+                  }
+                }, 3500);
+              }
             }
           }
 
@@ -438,18 +532,24 @@ export default function InterviewRoomPage() {
             message.message?.role === "assistant" &&
             message.message?.content
           ) {
-            console.log(
-              "💬 Structured AI Message received. Processing for problem."
-            );
-            fullAssistantUtteranceForParsing = message.message.content;
+            console.log("💬 Structured AI Message received.");
+            fullAssistantUtteranceForProblemParsing = message.message.content;
+            finalUtterancesRef.current.push({
+              role: "assistant",
+              content: message.message.content,
+              timestamp: new Date(),
+            });
+            // Clear buffer as we have a full message
             if (assistantModelOutputTimeoutRef.current)
               clearTimeout(assistantModelOutputTimeoutRef.current);
             assistantModelOutputBufferRef.current = "";
             setIsSpeaking((prev) => ({ ...prev, assistant: false }));
           }
 
-          if (fullAssistantUtteranceForParsing) {
-            processAssistantContentForProblem(fullAssistantUtteranceForParsing);
+          if (fullAssistantUtteranceForProblemParsing) {
+            processAssistantContentForProblem(
+              fullAssistantUtteranceForProblemParsing
+            );
           }
 
           if (
@@ -459,127 +559,74 @@ export default function InterviewRoomPage() {
             console.log("📋 Function call or conversation update:", message);
           }
         });
-
-        vapi.on("error", (error: any) => {
-          console.error("❌ Vapi error:", error);
-          let errorMessage =
-            error?.message ||
-            error?.error ||
-            (typeof error === "string" && error) ||
-            "An unknown Vapi error occurred.";
-          setError(`Vapi error: ${errorMessage}`);
-          setIsCallActive(false);
-          setIsConnecting(false);
-          setIsSpeaking({ user: false, assistant: false });
-        });
       } catch (err: any) {
-        console.error("❌ Error initializing Vapi:", err);
-        setError(`Failed to initialize Vapi: ${err.message}`);
+        setError((err as Error).message);
         setInitialLoading(false);
       }
     }
-
     return () => {
       if (vapiRef.current) {
         try {
-          console.log("🧹 Cleaning up Vapi instance");
           vapiRef.current.stop();
-        } catch (e) {
-          console.error("Error stopping Vapi on cleanup:", e);
-        }
+        } catch (e) {}
         vapiRef.current = null;
       }
-      if (transcriptTimeoutRef.current)
-        clearTimeout(transcriptTimeoutRef.current);
+      if (displayTranscriptTimeoutRef.current)
+        clearTimeout(displayTranscriptTimeoutRef.current);
       if (codeUpdateTimeoutRef.current)
         clearTimeout(codeUpdateTimeoutRef.current);
       if (assistantModelOutputTimeoutRef.current)
         clearTimeout(assistantModelOutputTimeoutRef.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [processAssistantContentForProblem]); // Added processAssistantContentForProblem to dependencies
+  }, [processAssistantContentForProblem]);
 
-  // Helper function to add unique messages to transcript array
-  const addUniqueMessage = (
-    currentTranscript: Message[],
-    newMessage: Message
-  ): Message[] => {
-    const exists = currentTranscript.some(
-      (msg) =>
-        msg.role === newMessage.role &&
-        msg.content === newMessage.content &&
-        msg.timestamp.getTime() === newMessage.timestamp.getTime()
+  const addUniqueDisplayMessage = (
+    currentTranscript: DisplayMessage[],
+    newMessage: DisplayMessage
+  ): DisplayMessage[] => {
+    const key = `${newMessage.role}-${
+      newMessage.content
+    }-${newMessage.timestamp.getTime()}`;
+    const map = new Map(
+      currentTranscript.map((m) => [
+        `${m.role}-${m.content}-${m.timestamp.getTime()}`,
+        m,
+      ])
     );
-    if (!exists) {
-      return [...currentTranscript, newMessage];
+    if (!map.has(key)) {
+      map.set(key, newMessage);
     }
-    return currentTranscript;
+    return Array.from(map.values());
   };
 
   useEffect(() => {
     try {
       const configString = localStorage.getItem("interviewConfig");
-      if (!configString)
-        throw new Error("Interview configuration not found in localStorage.");
-      const config: InterviewConfig = JSON.parse(configString);
-      setInterviewConfig(config);
-      console.log("📋 Interview config loaded:", config);
+      if (!configString) throw new Error("Interview config not found.");
+      setInterviewConfig(JSON.parse(configString));
     } catch (err: any) {
-      console.error("❌ Error loading interview configuration:", err);
-      setError(err.message + " Please reconfigure your interview.");
+      setError((err as Error).message + " Please reconfigure.");
     } finally {
       setInitialLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [transcript]);
-
-  const handleCodeChange = useCallback(
-    (newCode: string) => {
-      setCode(newCode);
-      currentCodeRef.current = newCode;
-      if (codeUpdateTimeoutRef.current)
-        clearTimeout(codeUpdateTimeoutRef.current);
-      codeUpdateTimeoutRef.current = setTimeout(() => {
-        if (isCallActive && vapiRef.current && newCode.trim().length > 10) {
-          try {
-            vapiRef.current.send({
-              type: "add-message",
-              message: {
-                role: "system",
-                content: `Candidate code update:\n\`\`\`\n${newCode}\n\`\`\`\nSilently review. Only comment if asked or if they are very stuck.`,
-              },
-            });
-            console.log("📤 Code update sent");
-          } catch (err) {
-            console.error("❌ Error sending code update:", err);
-          }
-        }
-      }, 3000);
-    },
-    [isCallActive]
-  );
+    displayTranscriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [displayTranscript]);
 
   const startCall = useCallback(() => {
-    if (!vapiRef.current) {
-      setError("Vapi not initialized. Please refresh.");
+    if (!vapiRef.current || !interviewConfig || isConnecting || isCallActive)
       return;
-    }
-    if (!interviewConfig) {
-      setError("Interview config missing. Please reconfigure.");
-      return;
-    }
-    if (isConnecting || isCallActive) return;
-
     console.log("🚀 Starting Vapi call...");
     setIsConnecting(true);
-    setTranscript([]);
+    setDisplayTranscript([]);
     setProblem(null);
     setError(null);
-    setIsSpeaking({ user: false, assistant: false });
-    assistantModelOutputBufferRef.current = ""; // Clear buffer before new call
+    finalUtterancesRef.current = [];
+    assistantModelOutputBufferRef.current = "";
+    // Reset code to default for the initial language of CodeEditor or a chosen default
+    // setCode(getStarterTemplate("cpp")); // Assuming CodeEditor defaults to C++
 
     const companyNames = interviewConfig.companies
       .map((c) => c.name)
@@ -588,7 +635,6 @@ export default function InterviewRoomPage() {
       interviewConfig.type === "dsa"
         ? "Data Structures & Algorithms"
         : "System Design";
-
     const systemPrompt = `You are an AI Technical Interviewer for ${companyNames}.
 Your ONLY purpose is to conduct this ${interviewTypeText} interview at ${interviewConfig.difficulty} difficulty.
 This is a 30-minute session.
@@ -619,7 +665,7 @@ Your persona: Professional, encouraging, clear, and very patient. Your goal is a
         provider: "openai",
         model: "gpt-4o",
         messages: [{ role: "system", content: systemPrompt }],
-      }, // Using gpt-4o
+      },
       voice: { provider: "openai", voiceId: "alloy" },
       firstMessage: `Hi! I'm your AI interviewer from ${companyNames}. Thanks for joining. To start, could you tell me a bit about your experience with ${
         interviewConfig.type === "dsa"
@@ -627,18 +673,12 @@ Your persona: Professional, encouraging, clear, and very patient. Your goal is a
           : "system design principles"
       }?`,
     };
-
-    console.log(
-      "📞 Starting call with config. System Prompt snippet:",
-      systemPrompt.substring(0, 200) + "..."
-    );
     try {
       // @ts-ignore
       vapiRef.current.start(assistantConfig);
       console.log("✨ Call start request sent");
     } catch (err: any) {
-      console.error("❌ Error starting call:", err);
-      setError(`Failed to start call: ${err.message || "Unknown Vapi error"}`);
+      setError((err as Error).message);
       setIsConnecting(false);
     }
   }, [
@@ -646,7 +686,7 @@ Your persona: Professional, encouraging, clear, and very patient. Your goal is a
     isConnecting,
     isCallActive,
     processAssistantContentForProblem,
-  ]); // Added processAssistantContentForProblem
+  ]);
 
   const toggleMicrophone = useCallback(() => {
     if (vapiRef.current && isCallActive) {
@@ -663,53 +703,36 @@ Your persona: Professional, encouraging, clear, and very patient. Your goal is a
     }
   }, [isMicrophoneEnabled, isCallActive]);
 
-  // --- UI Rendering ---
   if (initialLoading) {
     return (
       <div className="h-screen flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mb-4"></div>
-          <p className="text-lg">Loading interview settings...</p>
-        </div>
+        <Loader2 className="h-12 w-12 animate-spin text-primary" />{" "}
+        <p className="ml-3 text-lg">Loading Interview...</p>
       </div>
     );
   }
-
   if (isEnding) {
     return (
-      <div className="h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950">
-        <div className="text-center bg-background p-8 rounded-lg shadow-xl max-w-md">
-          <div className="text-4xl mb-4">✅</div>
-          <h1 className="text-xl font-semibold mb-4">
-            Interview Session Ended
-          </h1>
-          <p className="text-muted-foreground mb-6">
-            Thank you! You'll be redirected shortly.
-          </p>
-          <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-primary mx-auto"></div>
-        </div>
+      <div className="h-screen flex flex-col items-center justify-center text-center p-4">
+        <Loader2 className="h-12 w-12 animate-spin text-primary mb-4" />
+        <p className="text-lg">Ending session and preparing feedback...</p>
+        <p className="text-sm text-muted-foreground">Please wait a moment.</p>
       </div>
     );
   }
-
-  if (!interviewConfig && !initialLoading) {
+  if (!interviewConfig && !initialLoading && !isEnding) {
     return (
-      <div className="h-screen flex items-center justify-center p-4">
-        <div className="text-center bg-background p-8 rounded-lg shadow-xl max-w-md">
-          <div className="text-4xl mb-4">⚠️</div>
-          <h1 className="text-xl font-semibold mb-4 text-destructive">
-            Configuration Error
-          </h1>
-          <p className="text-muted-foreground mb-6">
-            {error || "Interview configuration missing. Please reconfigure."}
-          </p>
-          <Button
-            onClick={() => router.push("/interview/configure")}
-            className="w-full"
-          >
-            Configure Interview
-          </Button>
-        </div>
+      <div className="h-screen flex flex-col items-center justify-center p-4 text-center">
+        <AlertTriangle className="h-12 w-12 text-destructive mb-4" />
+        <p className="mb-4 text-lg text-red-700 dark:text-red-400">
+          {error || "Interview Configuration Error."}
+        </p>
+        <p className="text-sm text-muted-foreground mb-6">
+          Please return to the setup page and configure your interview.
+        </p>
+        <Button onClick={() => router.push("/interview/configure")}>
+          Reconfigure Interview
+        </Button>
       </div>
     );
   }
@@ -720,10 +743,10 @@ Your persona: Professional, encouraging, clear, and very patient. Your goal is a
         <Button
           variant="ghost"
           size="sm"
-          onClick={() => endCall()}
+          onClick={() => endCall(false)}
           disabled={isEnding}
         >
-          <ArrowLeft className="h-4 w-4 mr-2" /> Exit Interview
+          <ArrowLeft className="h-4 w-4 mr-2" /> Exit (No Feedback)
         </Button>
         <div className="flex items-center space-x-4">
           <InterviewTimer
@@ -753,7 +776,7 @@ Your persona: Professional, encouraging, clear, and very patient. Your goal is a
         </Button>
       </header>
 
-      {error && (
+      {error && !isEnding && (
         <div
           className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mx-4 mt-2"
           role="alert"
@@ -764,7 +787,7 @@ Your persona: Professional, encouraging, clear, and very patient. Your goal is a
             onClick={() => setError(null)}
             className="absolute top-0 bottom-0 right-0 px-4 py-3"
           >
-            <span className="text-xl">×</span>
+            <span>×</span>
           </button>
         </div>
       )}
@@ -777,6 +800,32 @@ Your persona: Professional, encouraging, clear, and very patient. Your goal is a
               isSpeaking={isSpeaking.assistant}
             />
           </div>
+          <div className="border-t p-2 max-h-48 overflow-y-auto bg-slate-100 dark:bg-slate-800">
+            <h3 className="text-xs font-semibold p-1 text-muted-foreground uppercase tracking-wider">
+              Live Transcript
+            </h3>
+            {displayTranscript.length === 0 && (
+              <p className="text-xs text-muted-foreground text-center py-2">
+                Conversation will appear here...
+              </p>
+            )}
+            {displayTranscript.map((item, index) => (
+              <div
+                key={`${item.timestamp.getTime()}-${index}-${item.role}`}
+                className={`text-xs p-1.5 my-1 rounded-md shadow-sm ${
+                  item.role === "assistant"
+                    ? "bg-blue-50 dark:bg-blue-900/40 text-blue-800 dark:text-blue-200"
+                    : "bg-green-50 dark:bg-green-900/40 text-green-800 dark:text-green-200"
+                }`}
+              >
+                <strong className="font-medium">
+                  {item.role === "assistant" ? "AI: " : "You: "}
+                </strong>
+                {item.content}
+              </div>
+            ))}
+            <div ref={displayTranscriptEndRef} />
+          </div>
           <div className="border-t p-4 shrink-0 bg-slate-50 dark:bg-slate-900">
             {!isCallActive ? (
               <Button
@@ -787,34 +836,51 @@ Your persona: Professional, encouraging, clear, and very patient. Your goal is a
                 className="w-full"
                 size="lg"
               >
-                {isConnecting ? "Connecting..." : "🚀 Start Interview"}
+                {isConnecting ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Connecting...
+                  </>
+                ) : (
+                  "🚀 Start Interview"
+                )}
               </Button>
             ) : (
               <Button
                 variant="destructive"
-                onClick={() => endCall()}
+                onClick={() => endCall(true)}
                 className="w-full"
                 size="lg"
                 disabled={isEnding}
               >
-                {isEnding ? "Ending..." : "🛑 End Interview"}
+                {isEnding ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Ending...
+                  </>
+                ) : (
+                  "🛑 End Interview & Get Feedback"
+                )}
               </Button>
             )}
             <div className="mt-2 text-center text-xs text-muted-foreground">
               {isCallActive
-                ? "🎤 Take your time. The AI is patient!"
-                : "Ensure mic is enabled before starting."}
+                ? "AI is listening. Take your time."
+                : "Mic check before starting."}
             </div>
           </div>
         </div>
 
         <div className="flex flex-col bg-background rounded-lg shadow-md overflow-hidden">
           <div className="flex-1 min-h-0">
-            <CodeEditor onChange={handleCodeChange} />
+            <CodeEditor
+              onChange={handleCodeChange} // Correctly pass the handler
+              initialCode={code} // Pass the 'code' state to allow updates
+              initialLanguage="cpp" // Default language for the editor instance
+            />
           </div>
           {/* <div className="md:h-1/3 min-h-[200px] border-t overflow-y-auto p-4">
             <ProblemDisplay problem={problem} />
-            {console.log("📜 Problem Displayed:", problem)}
           </div> */}
         </div>
       </div>
