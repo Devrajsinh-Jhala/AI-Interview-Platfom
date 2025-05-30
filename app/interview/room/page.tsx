@@ -4,18 +4,9 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Vapi from "@vapi-ai/web";
-import {
-  ArrowLeft,
-  Mic,
-  MicOff,
-  Timer,
-  MessageCircle,
-  ChevronUp,
-  ChevronDown,
-} from "lucide-react";
+import { ArrowLeft, Mic, MicOff, Timer } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CodeEditor } from "@/components/interview/CodeEditor";
-import { ProblemDisplay } from "@/components/interview/ProblemDisplay";
 import { InterviewConfig } from "@/types/interview";
 
 // Enhanced Timer component with expiration callback
@@ -164,7 +155,6 @@ export default function InterviewRoomPage() {
     assistant: false,
   });
   const [isEnding, setIsEnding] = useState(false);
-  const [isChatOpen, setIsChatOpen] = useState(false); // New state for chat toggle
 
   // Refs for managing state
   const currentCodeRef = useRef(code);
@@ -446,10 +436,6 @@ export default function InterviewRoomPage() {
           setIsConnecting(false);
           setIsSpeaking({ user: false, assistant: false });
         });
-
-        vapi.on("volume-level", (volume: number) => {
-          // Optional: Handle volume level updates for UI feedback
-        });
       } catch (err: any) {
         console.error("❌ Error initializing Vapi:", err);
         setError(`Failed to initialize Vapi: ${err.message}`);
@@ -615,6 +601,7 @@ Keep your responses conversational, encouraging, and PATIENT. Give them space to
     console.log("📞 Starting call with enhanced patience config");
 
     try {
+      // @ts-ignore
       vapiRef.current.start(assistantConfig);
       console.log("✨ Call start request sent");
     } catch (err: any) {
@@ -665,8 +652,8 @@ Keep your responses conversational, encouraging, and PATIENT. Give them space to
             Interview Session Ended
           </h1>
           <p className="text-muted-foreground mb-6">
-            Thank you for using our AI interview platform. You'll be redirected
-            to the home page shortly.
+            Thank you for using our AI interview platform. You&apos;ll be
+            redirected to the home page shortly.
           </p>
           <div className="flex items-center justify-center gap-2">
             <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary"></div>

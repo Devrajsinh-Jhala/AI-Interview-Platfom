@@ -1,7 +1,7 @@
 // app/api/daily/create-room/route.ts
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 
-export async function POST(req: NextRequest) {
+export async function POST() {
     try {
         const dailyApiKey = process.env.DAILY_API_KEY;
 

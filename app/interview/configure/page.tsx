@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button'
 import { CompanySelector, type Company } from '@/components/interview/CompanySelector'
 import { InterviewTypeSelector, type InterviewType } from '@/components/interview/InterviewTypeSelector'
 import { DifficultySelector, type DifficultyLevel } from '@/components/interview/DifficultySelector'
-import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/components/ui/card'
+import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card'
 import {
   Tooltip,
   TooltipContent,
@@ -129,13 +129,13 @@ export default function InterviewConfigurePage() {
                       </Button>
                     </TooltipTrigger>
                     <TooltipContent>
-                      <p>Select the companies you're preparing for. This will tailor questions to their interview style.</p>
+                      <p>Select the companies you&apos;re preparing for. This will tailor questions to their interview style.</p>
                     </TooltipContent>
                   </Tooltip>
                 </TooltipProvider>
               </div>
               <CardDescription>
-                Choose one or more companies that you're targeting for interviews.
+                Choose one or more companies that you&apos;re targeting for interviews.
               </CardDescription>
             </CardHeader>
             <CardContent>
